@@ -1,0 +1,193 @@
+/*
+ * vim: sw=4 ts=4
+ * stap iowatcher.stp -x <pid>
+ * stap iowatcher.stp -c <cmd>
+ */
+
+global start
+global entry_io
+global fd_io
+global time_io
+
+function timestamp:long() {
+	return gettimeofday_us() - start
+}
+
+function proc:string() {
+	return sprintf("%5d (%s)", pid(), execname())
+}
+
+probe begin {
+	start = gettimeofday_us()
+}
+
+global filenames
+global filehandles
+global fileread
+global filewrite
+
+probe syscall.open {
+	if( pid() == target() )	{
+		filenames[pid()] = user_string($filename)
+	}
+} 
+
+probe syscall.open.return {
+	if( pid() == target() )	{
+		if ($return != -1) {
+			filehandles[pid(), $return] = filenames[pid()]
+			fileread[pid(), $return] = 0
+			filewrite[pid(), $return] = 0
+			printf(
+				"%10d %s open(\"%s\") returns %d\n", 
+				timestamp(), 
+				proc(), 
+				filenames[pid()], 
+				$return
+			)
+		} else {
+			printf(
+				"%10d %s open(\"%s\") fail %d\n", 
+				timestamp(), 
+				proc(), 
+				filenames[pid()], 
+				$return
+			)
+		}
+		delete filenames[pid()]
+	}
+}
+
+probe syscall.read {
+	if( pid() == target() )	{
+		if ($count > 0) {
+			fileread[pid(), $fd] += $count
+		}
+		t = gettimeofday_us(); p = pid()
+		entry_io[p] = t
+		fd_io[p] = $fd
+	}
+}
+
+probe syscall.read.return {
+	if( pid() == target() )	{
+		t = gettimeofday_us(); p = pid()
+		fd = fd_io[p]
+		time_io[p,fd] <<< t - entry_io[p]
+	}
+}
+
+probe syscall.write {
+	if( pid() == target() )	{
+		if ($count > 0) {
+			filewrite[pid(), $fd] += $count
+		}
+		t = gettimeofday_us(); p = pid()
+		entry_io[p] = t
+		fd_io[p] = $fd
+	}
+}
+
+probe syscall.write.return {
+	if( pid() == target() )	{
+		t = gettimeofday_us(); p = pid()
+		fd = fd_io[p]
+		time_io[p,fd] <<< t - entry_io[p]
+	}
+}
+
+probe syscall.close {
+	if( pid() == target() )	{
+		if (filehandles[pid(), $fd] != "") {
+			printf(
+				"%10d %s close(\"%s\") rbytes: %d wbytes: %d\n",  
+				timestamp(), 
+				proc(),
+				filehandles[pid(), $fd], 
+				fileread[pid(), $fd], 
+				filewrite[pid(), $fd]
+			)
+			if (@count(time_io[pid(), $fd]))	{
+				printf(
+					"%10d %s I/O for \"%s\" time: %d usec\n",  
+					timestamp(), 
+					proc(),
+					filehandles[pid(), $fd], 
+					@sum(time_io[pid(), $fd])
+				)
+			}
+		}
+		delete fileread[pid(), $fd]
+		delete filewrite[pid(), $fd]
+		delete filehandles[pid(), $fd]
+		delete fd_io[pid()]
+		delete entry_io[pid()]
+		delete time_io[pid(),$fd]
+	}
+}
+#
+
+global	stats
+
+probe syscall.stat {
+	if( pid() == target() )	{
+		stats[pid()] = user_string($filename)
+	}
+} 
+
+probe syscall.stat.return {
+	if( pid() == target() )	{
+		if ($return != -1) {
+			printf( 
+				"%10d %s stat(\"%s\") returns %d.\n", 
+				timestamp(), 
+				proc(), 
+				stats[pid()], 
+				$return
+			)
+		} else {
+			printf(
+				"%10d %s stat(\"%s\") fail\n", 
+				timestamp(), 
+				proc(), 
+				filenames[pid()]
+			)
+		}
+		delete stats[pid()]
+	}
+}
+
+#
+
+global	accesses
+global	modes
+
+probe syscall.access {
+	if( pid() == target() )	{
+		accesses[pid()] = user_string($filename)
+		modes[pid()] = $mode
+	}
+} 
+
+probe syscall.access.return {
+	if( pid() == target() )	{
+		if ($return != -1) {
+			printf( 
+				"%10d %s access(\"%s\",%d) returns %d.\n", 
+				timestamp(), 
+				proc(), 
+				accesses[pid()], 
+				modes[pid()],
+				$return
+			)
+		} else {
+			printf(
+				"%10d %s access(\"%s\") fail\n", 
+				timestamp(), 
+				proc(), 
+				filenames[pid()]
+			)
+		}
+		delete accesses[pid()]
+	}
+}
